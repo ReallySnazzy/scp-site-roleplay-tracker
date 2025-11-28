@@ -71,14 +71,14 @@ function App() {
             </div>
           </div>
 
-          <div className="flex gap-2">
+          <div className="flex gap-2 w-full">
             <input
               type="text"
               placeholder="ENTER CODE"
               maxLength={6}
               value={joinCode}
               onChange={(e) => setJoinCode(e.target.value.toUpperCase())}
-              className="flex-1 bg-slate-950 border border-slate-700 rounded-lg px-4 py-3 text-center text-xl tracking-widest uppercase focus:outline-none focus:border-cyan-500 transition-colors text-white"
+              className="flex-1 min-w-0 bg-slate-950 border border-slate-700 rounded-lg px-4 py-3 text-center text-xl tracking-widest uppercase focus:outline-none focus:border-cyan-500 transition-colors text-white"
             />
             <button
               onClick={joinSession}
