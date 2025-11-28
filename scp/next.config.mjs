@@ -9,6 +9,7 @@ const nextConfig = {
     images: {
         unoptimized: true,
     },
+    basePath: '/scp-site-roleplay-tracker',
 };
 
 export default nextConfig;
