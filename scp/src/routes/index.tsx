@@ -137,7 +137,7 @@ function App() {
         </div>
 
         {/* Right Column - Tracker Log */}
-        <div className="bg-slate-900 border-2 border-slate-700 rounded-xl overflow-hidden shadow-lg flex flex-col h-[calc(100vh-8rem)] sticky top-4">
+        <div className="bg-slate-900 border-2 border-slate-700 rounded-xl overflow-hidden shadow-lg flex flex-col min-h-[400px] sticky top-4">
           <div className="bg-slate-800 p-4 border-b-2 border-slate-700 flex justify-between items-center">
             <h2 className="text-2xl font-bold text-cyan-500 uppercase tracking-wider">
               Active Alerts
@@ -148,7 +148,7 @@ function App() {
             </div>
           </div>
 
-          <div className="flex-1 overflow-y-auto p-4 space-y-3 custom-scrollbar">
+          <div className="flex-1 p-4 space-y-3">
             <AnimatePresence initial={false}>
               {logs.map((log) => (
                 <motion.div
