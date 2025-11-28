@@ -7,6 +7,7 @@ import tailwindcss from '@tailwindcss/vite'
 import { nitro } from 'nitro/vite'
 
 const config = defineConfig({
+  base: '/scp-site-roleplay-tracker/',
   plugins: [
     devtools(),
     nitro(),
