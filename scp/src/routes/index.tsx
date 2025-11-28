@@ -1,9 +1,10 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { X, AlertTriangle, ShieldAlert, Skull } from 'lucide-react'
+import { X, AlertTriangle, ShieldAlert, Skull, Users, Wifi, WifiOff, Copy, Check } from 'lucide-react'
 import { clsx, type ClassValue } from 'clsx'
 import { twMerge } from 'tailwind-merge'
+import Peer, { type DataConnection } from 'peerjs'
 
 export const Route = createFileRoute('/')({ component: App })
 
@@ -15,39 +16,309 @@ type LogItem = {
   id: string
   type: 'breach' | 'event'
   content: string
-  timestamp: Date
+  timestamp: string // Changed to string for serialization
 }
+
+type ConnectionMode = 'selecting' | 'offline' | 'host' | 'client'
+
+type NetworkMessage =
+  | { type: 'SYNC_LOGS'; logs: LogItem[] }
+  | { type: 'ADD_LOG'; log: LogItem }
+  | { type: 'REMOVE_LOG'; id: string }
 
 function App() {
   const [inputBuffer, setInputBuffer] = useState<string>('')
   const [logs, setLogs] = useState<LogItem[]>([])
 
+  // Multiplayer State
+  const [mode, setMode] = useState<ConnectionMode>('selecting')
+  const [sessionCode, setSessionCode] = useState<string>('')
+  const [joinCode, setJoinCode] = useState<string>('')
+  const [isConnected, setIsConnected] = useState(false)
+  const [copySuccess, setCopySuccess] = useState(false)
+
+  const peerRef = useRef<Peer | null>(null)
+  const connectionsRef = useRef<DataConnection[]>([])
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      peerRef.current?.destroy()
+    }
+  }, [])
+
+  const generateCode = () => {
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+    let code = ''
+    for (let i = 0; i < 6; i++) {
+      code += chars.charAt(Math.floor(Math.random() * chars.length))
+    }
+    return code
+  }
+
+  const startHost = () => {
+    const code = generateCode()
+    setSessionCode(code)
+    setMode('host')
+
+    // Initialize Peer
+    // We use a prefix to avoid collisions on the public server, but the user only sees the code
+    const id = `scp-tracker-${code}`
+    const peer = new Peer(id)
+    peerRef.current = peer
+
+    peer.on('open', () => {
+      setIsConnected(true)
+    })
+
+    peer.on('connection', (conn) => {
+      connectionsRef.current.push(conn)
+
+      conn.on('open', () => {
+        // Send current state to new client
+        conn.send({ type: 'SYNC_LOGS', logs })
+      })
+
+      conn.on('data', (data: any) => {
+        handleNetworkMessage(data)
+      })
+
+      conn.on('close', () => {
+        connectionsRef.current = connectionsRef.current.filter(c => c !== conn)
+      })
+    })
+
+    peer.on('error', (err) => {
+      console.error('Peer error:', err)
+      alert(`Connection Error: ${err.type}`)
+    })
+  }
+
+  const joinSession = () => {
+    if (joinCode.length !== 6) return
+    setMode('client')
+    setSessionCode(joinCode.toUpperCase())
+
+    const peer = new Peer() // Random ID for client
+    peerRef.current = peer
+
+    peer.on('open', () => {
+      const hostId = `scp-tracker-${joinCode.toUpperCase()}`
+      const conn = peer.connect(hostId)
+
+      conn.on('open', () => {
+        setIsConnected(true)
+        connectionsRef.current.push(conn)
+      })
+
+      conn.on('data', (data: any) => {
+        handleNetworkMessage(data)
+      })
+
+      conn.on('close', () => {
+        setIsConnected(false)
+        alert('Host disconnected')
+        setMode('selecting')
+      })
+
+      conn.on('error', (err) => {
+        console.error('Connection error:', err)
+        alert('Could not connect to host. Check the code.')
+        setMode('selecting')
+      })
+    })
+  }
+
+  const handleNetworkMessage = (msg: NetworkMessage) => {
+    if (msg.type === 'SYNC_LOGS') {
+      setLogs(msg.logs)
+    } else if (msg.type === 'ADD_LOG') {
+      // If Host: Apply update and broadcast
+      // If Client: Should not receive ADD_LOG directly usually, but if we do (e.g. echo), update
+      if (mode === 'host') {
+        setLogs(prev => {
+          const newLogs = [msg.log, ...prev]
+          broadcast({ type: 'SYNC_LOGS', logs: newLogs })
+          return newLogs
+        })
+      } else {
+        // Client receiving update (usually via SYNC_LOGS, but handling granular if needed)
+        // For simplicity, Host always broadcasts SYNC_LOGS after any change
+      }
+    } else if (msg.type === 'REMOVE_LOG') {
+      if (mode === 'host') {
+        setLogs(prev => {
+          const newLogs = prev.filter(l => l.id !== msg.id)
+          broadcast({ type: 'SYNC_LOGS', logs: newLogs })
+          return newLogs
+        })
+      }
+    }
+  }
+
+  const broadcast = (msg: NetworkMessage) => {
+    connectionsRef.current.forEach(conn => {
+      if (conn.open) conn.send(msg)
+    })
+  }
+
   const handleNumberClick = (num: number) => {
     const newBuffer = inputBuffer + num.toString()
     if (newBuffer.length === 3) {
-      addLog('breach', `SCP-${newBuffer} BREACH`)
+      createLog('breach', `SCP-${newBuffer} BREACH`)
       setInputBuffer('')
     } else {
       setInputBuffer(newBuffer)
     }
   }
 
-  const addLog = (type: 'breach' | 'event', content: string) => {
+  const createLog = (type: 'breach' | 'event', content: string) => {
     const newLog: LogItem = {
       id: Math.random().toString(36).substring(7),
       type,
       content,
-      timestamp: new Date(),
+      timestamp: new Date().toISOString(),
     }
-    setLogs((prev) => [newLog, ...prev])
+
+    if (mode === 'offline') {
+      setLogs(prev => [newLog, ...prev])
+    } else if (mode === 'host') {
+      setLogs(prev => {
+        const newLogs = [newLog, ...prev]
+        broadcast({ type: 'SYNC_LOGS', logs: newLogs })
+        return newLogs
+      })
+    } else if (mode === 'client') {
+      // Send action to host
+      const conn = connectionsRef.current[0]
+      if (conn && conn.open) {
+        conn.send({ type: 'ADD_LOG', log: newLog })
+      }
+    }
   }
 
   const removeLog = (id: string) => {
-    setLogs((prev) => prev.filter((log) => log.id !== id))
+    if (mode === 'offline') {
+      setLogs(prev => prev.filter(log => log.id !== id))
+    } else if (mode === 'host') {
+      setLogs(prev => {
+        const newLogs = prev.filter(log => log.id !== id)
+        broadcast({ type: 'SYNC_LOGS', logs: newLogs })
+        return newLogs
+      })
+    } else if (mode === 'client') {
+      const conn = connectionsRef.current[0]
+      if (conn && conn.open) {
+        conn.send({ type: 'REMOVE_LOG', id })
+      }
+    }
+  }
+
+  const copyCode = () => {
+    navigator.clipboard.writeText(sessionCode)
+    setCopySuccess(true)
+    setTimeout(() => setCopySuccess(false), 2000)
+  }
+
+  if (mode === 'selecting') {
+    return (
+      <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4 font-mono">
+        <div className="bg-slate-900 border-2 border-slate-700 p-8 rounded-xl max-w-md w-full shadow-2xl">
+          <h1 className="text-3xl font-bold text-slate-200 mb-8 text-center uppercase tracking-widest">
+            Select Mode
+          </h1>
+
+          <div className="space-y-4">
+            <button
+              onClick={() => setMode('offline')}
+              className="w-full p-4 bg-slate-800 hover:bg-slate-700 border border-slate-600 rounded-lg flex items-center gap-4 transition-all group"
+            >
+              <div className="p-3 bg-slate-700 rounded-full group-hover:bg-slate-600">
+                <WifiOff className="w-6 h-6 text-slate-400" />
+              </div>
+              <div className="text-left">
+                <div className="font-bold text-slate-200">OFFLINE OPS</div>
+                <div className="text-sm text-slate-500">Local device only</div>
+              </div>
+            </button>
+
+            <button
+              onClick={startHost}
+              className="w-full p-4 bg-slate-800 hover:bg-slate-700 border border-slate-600 rounded-lg flex items-center gap-4 transition-all group"
+            >
+              <div className="p-3 bg-cyan-900/30 rounded-full group-hover:bg-cyan-900/50">
+                <Users className="w-6 h-6 text-cyan-400" />
+              </div>
+              <div className="text-left">
+                <div className="font-bold text-cyan-400">HOST SESSION</div>
+                <div className="text-sm text-slate-500">Create a shared room</div>
+              </div>
+            </button>
+
+            <div className="relative">
+              <div className="absolute inset-0 flex items-center">
+                <div className="w-full border-t border-slate-700"></div>
+              </div>
+              <div className="relative flex justify-center text-sm">
+                <span className="px-2 bg-slate-900 text-slate-500">OR JOIN</span>
+              </div>
+            </div>
+
+            <div className="flex gap-2">
+              <input
+                type="text"
+                placeholder="ENTER CODE"
+                maxLength={6}
+                value={joinCode}
+                onChange={(e) => setJoinCode(e.target.value.toUpperCase())}
+                className="flex-1 bg-slate-950 border border-slate-700 rounded-lg px-4 py-3 text-center text-xl tracking-widest uppercase focus:outline-none focus:border-cyan-500 transition-colors text-white"
+              />
+              <button
+                onClick={joinSession}
+                disabled={joinCode.length !== 6}
+                className="px-6 bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold rounded-lg transition-colors"
+              >
+                JOIN
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    )
   }
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-200 font-mono p-4 md:p-8">
+      {/* Status Bar */}
+      <div className="max-w-7xl mx-auto mb-6 flex justify-between items-center bg-slate-900/50 p-2 rounded-lg border border-slate-800">
+        <div className="flex items-center gap-2 px-2">
+          {mode === 'offline' ? (
+            <span className="flex items-center gap-2 text-slate-400">
+              <WifiOff className="w-4 h-4" /> OFFLINE
+            </span>
+          ) : (
+            <span className={cn("flex items-center gap-2", isConnected ? "text-green-400" : "text-amber-400")}>
+              <Wifi className="w-4 h-4" />
+              {mode === 'host' ? 'HOSTING' : 'CLIENT'}
+              {!isConnected && ' (CONNECTING...)'}
+            </span>
+          )}
+        </div>
+
+        {mode !== 'offline' && (
+          <div className="flex items-center gap-2">
+            <span className="text-slate-500 text-sm uppercase">Session Code:</span>
+            <button
+              onClick={copyCode}
+              className="flex items-center gap-2 bg-slate-800 hover:bg-slate-700 px-3 py-1 rounded border border-slate-600 transition-colors"
+            >
+              <span className="font-bold text-cyan-400 tracking-widest text-lg">{sessionCode}</span>
+              {copySuccess ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4 text-slate-400" />}
+            </button>
+          </div>
+        )}
+      </div>
+
       <div className="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-2 gap-8">
         {/* Left Column */}
         <div className="space-y-8">
@@ -95,7 +366,7 @@ function App() {
             </div>
             <div className="p-6 grid gap-4">
               <button
-                onClick={() => addLog('event', 'CLASS D RIOT IN PROGRESS')}
+                onClick={() => createLog('event', 'CLASS D RIOT IN PROGRESS')}
                 className="group relative overflow-hidden p-4 bg-orange-900/30 hover:bg-orange-900/50 border border-orange-700/50 rounded-lg transition-all text-left"
               >
                 <div className="absolute inset-0 bg-orange-500/10 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-700" />
@@ -108,7 +379,7 @@ function App() {
               </button>
 
               <button
-                onClick={() => addLog('event', 'CLASS D ESCAPE ATTEMPT')}
+                onClick={() => createLog('event', 'CLASS D ESCAPE ATTEMPT')}
                 className="group relative overflow-hidden p-4 bg-red-900/30 hover:bg-red-900/50 border border-red-700/50 rounded-lg transition-all text-left"
               >
                 <div className="absolute inset-0 bg-red-500/10 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-700" />
@@ -121,7 +392,7 @@ function App() {
               </button>
 
               <button
-                onClick={() => addLog('event', 'CHAOS INSURGENCY DETECTED')}
+                onClick={() => createLog('event', 'CHAOS INSURGENCY DETECTED')}
                 className="group relative overflow-hidden p-4 bg-green-900/30 hover:bg-green-900/50 border border-green-700/50 rounded-lg transition-all text-left"
               >
                 <div className="absolute inset-0 bg-green-500/10 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-700" />
@@ -167,7 +438,7 @@ function App() {
                   <div>
                     <div className="font-bold text-lg tracking-wide">{log.content}</div>
                     <div className="text-xs opacity-60 font-mono mt-1">
-                      {log.timestamp.toLocaleTimeString()} :: ID-{log.id}
+                      {new Date(log.timestamp).toLocaleTimeString()} :: ID-{log.id}
                     </div>
                   </div>
                   <button
@@ -182,7 +453,7 @@ function App() {
             </AnimatePresence>
 
             {logs.length === 0 && (
-              <div className="h-full flex flex-col items-center justify-center text-slate-600 opacity-50">
+              <div className="h-full flex flex-col items-center justify-center text-slate-600 opacity-50 py-12">
                 <ShieldAlert className="w-16 h-16 mb-4" />
                 <p className="text-xl uppercase tracking-widest">No Active Threats</p>
                 <p className="text-sm">Site Status: Normal</p>
